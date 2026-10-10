@@ -28,9 +28,97 @@ const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publisha
 // Initialize Supabase client for real mode
 export const supabase: SupabaseClient | null = !USE_MOCK
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: { persistSession: false } // We keep tokens in memory only as per instructions
+      auth: { persistSession: true, autoRefreshToken: true } // keeps people signed in after a page refresh
     })
   : null;
+
+// ============================================================================
+// REAL MODE HELPERS (Supabase)
+// ============================================================================
+// What we read for every student: their row, plus their hall through the allocations table
+const APPLICANT_SELECT = '*, allocations(hall_id, halls(*))';
+
+// Sign-up is two screens (check the SMS code, then create the account) but ONE server call in
+// real mode. The code typed on the first screen is kept here until the account is created.
+let pendingSignUpCode: { phone: string; code: string } | null = null;
+
+function firstOf(value: any): any {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function mapApplicantRow(row: any, role: UserRole): TraineeUser {
+  const allocation = firstOf(row.allocations);
+  const hall = allocation ? firstOf(allocation.halls) : null;
+  return {
+    id: row.id,
+    email: row.email || '',
+    phone_e164: row.phone_e164,
+    full_name: row.full_name,
+    trainee_id: row.ref_type === 'student_id' ? row.applicant_ref : undefined,
+    applicant_ref: row.applicant_ref,
+    programme: row.programme,
+    level: row.level,
+    role,
+    status: row.status,
+    hall_id: hall?.id ?? allocation?.hall_id,
+    hall_name: hall?.name,
+    hall_colour: hall?.colour ?? hall?.color,
+    hall_sms_count: row.hall_sms_count ?? 0,
+    hall_sms_sent_at: row.hall_sms_sent_at,
+    phone_verified_at: row.phone_verified_at,
+    created_at: row.created_at,
+    is_deleted: false
+  } as unknown as TraineeUser;
+}
+
+async function loadRealUser(authUser: { id: string; email?: string | null; user_metadata?: any }): Promise<TraineeUser> {
+  // Staff (Admin / Super Admin) are listed in the staff table
+  const { data: staffRow } = await supabase!.from('staff').select('role').eq('user_id', authUser.id).maybeSingle();
+  if (staffRow) {
+    return {
+      id: authUser.id,
+      email: authUser.email || '',
+      full_name: authUser.user_metadata?.full_name || authUser.email || 'Staff',
+      phone_e164: '',
+      level: 0,
+      role: staffRow.role,
+      status: 'active',
+      hall_sms_count: 0,
+      created_at: new Date().toISOString(),
+      is_deleted: false
+    } as unknown as TraineeUser;
+  }
+
+  // Everyone else is a student
+  const { data: row, error } = await supabase!
+    .from('applicants')
+    .select(APPLICANT_SELECT)
+    .eq('user_id', authUser.id)
+    .maybeSingle();
+  if (error) throw error;
+  if (!row) {
+    throw new Error('This login is not linked to a portal account. Please contact the administrator.');
+  }
+  const { data: viewerRow } = await supabase!.from('viewers').select('active').eq('applicant_id', row.id).maybeSingle();
+  return mapApplicantRow(row, viewerRow?.active ? 'viewer' : 'applicant');
+}
+
+async function currentRealUser(): Promise<TraineeUser> {
+  const { data } = await supabase!.auth.getUser();
+  if (!data.user) throw new Error('You are not signed in. Please sign in again.');
+  return loadRealUser(data.user);
+}
+
+async function fetchRealApplicants(): Promise<TraineeUser[]> {
+  const { data, error } = await supabase!
+    .from('applicants')
+    .select(APPLICANT_SELECT)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  const { data: viewerRows } = await supabase!.from('viewers').select('applicant_id, active');
+  const activeViewers = new Set((viewerRows || []).filter((v: any) => v.active).map((v: any) => v.applicant_id));
+  return (data || []).map((row: any) => mapApplicantRow(row, activeViewers.has(row.id) ? 'viewer' : 'applicant'));
+}
 
 // Generate 40 consecutive academic years starting from 2026/2027
 export function generateAcademicYears(startYear = 2026, count = 40): string[] {
@@ -319,6 +407,38 @@ export const api = {
   logout(): void {
     currentMemorySession = null;
     saveStoredSession(null);
+    if (supabase) {
+      void supabase.auth.signOut();
+    }
+  },
+
+  // --- REAL MODE SIGN-IN (Supabase Auth) ---
+  async realLogin(email: string, password: string): Promise<TraineeUser> {
+    const { data, error } = await supabase!.auth.signInWithPassword({
+      email: email.trim().toLowerCase(),
+      password
+    });
+    if (error || !data.user) {
+      throw new Error('Incorrect email or password.');
+    }
+    try {
+      return await loadRealUser(data.user);
+    } catch (err) {
+      await supabase!.auth.signOut();
+      throw err;
+    }
+  },
+
+  async restoreRealSession(): Promise<TraineeUser | null> {
+    const { data } = await supabase!.auth.getSession();
+    if (!data.session) return null;
+    return loadRealUser(data.session.user);
+  },
+
+  onRealAuthChange(callback: (signedIn: boolean) => void): () => void {
+    if (!supabase) return () => {};
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => callback(Boolean(session)));
+    return () => data.subscription.unsubscribe();
   },
 
   // --- SETTINGS & SYSTEM STATE ---
@@ -454,18 +574,14 @@ export const api = {
         .filter((u) => !u.deleted)
         .map(({ password_hash, ...u }) => ({ ...u }));
     }
-    const { data, error } = await supabase!.from('applicants').select('*').order('created_at', { ascending: false });
-    if (error) throw error;
-    return data || [];
+    return fetchRealApplicants();
   },
 
   async getAllUsersAdmin(): Promise<TraineeUser[]> {
     if (USE_MOCK) {
       return db.users.map(({ password_hash, ...u }) => ({ ...u }));
     }
-    const { data, error } = await supabase!.from('applicants').select('*');
-    if (error) throw error;
-    return data || [];
+    return fetchRealApplicants();
   },
 
   async updateTraineeDetails(
@@ -547,7 +663,7 @@ export const api = {
       saveMockDB(db);
       return;
     }
-    // Real mode
+    throw new Error('Restoring a deleted trainee is not switched on yet.');
   },
 
   async acknowledgeGraduation(traineeId: string): Promise<void> {
@@ -796,31 +912,18 @@ export const api = {
       };
     }
 
-    const sessionToken = token || sessionStorage.getItem('applicant_token');
-    if (!sessionToken) {
-      throw new Error('Unauthorized: No active applicant session token found.');
-    }
-
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/get-my-hall`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`
+    // Real mode: read the signed-in student's own record (protected by row-level security)
+    void token;
+    const me: any = await currentRealUser();
+    return {
+      applicant: {
+        id: me.id,
+        fullName: me.full_name,
+        applicantRef: me.trainee_id || me.applicant_ref || me.id,
+        status: me.status,
+        hall: me.hall_name ? { id: me.hall_id, name: me.hall_name, colour: me.hall_colour } : null
       }
-    });
-
-    if (res.status === 401) {
-      sessionStorage.removeItem('applicant_token');
-      sessionStorage.removeItem('applicant_token_expires_at');
-      throw new Error('Applicant session expired. Please verify your phone again.');
-    }
-
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || 'Failed to retrieve hall allocation.');
-    }
-
-    return await res.json();
+    };
   },
 
   // --- SMS LOGS & BULK SMS ---
@@ -876,8 +979,7 @@ export const api = {
 
       return { sentCount: recipients.length, unitsUsed: totalUnits };
     }
-    // Real call via Edge Function
-    return { sentCount: recipients.length, unitsUsed: totalUnits };
+    throw new Error('Bulk SMS is not switched on yet.');
   },
 
   // --- AUDIT LOGS ---
@@ -975,30 +1077,7 @@ export const api = {
       return;
     }
 
-    // Real Edge Function call for password reset OTP
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/request-otp`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`
-      },
-      body: JSON.stringify({ phone: phoneE164, kind: 'password_reset' })
-    });
-
-    if (res.status === 429) {
-      const retryAfterHeader = res.headers.get('Retry-After');
-      let retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : RESEND_COOLDOWN_SECONDS;
-      const data = await res.json().catch(() => ({}));
-      if (typeof data.retryAfter === 'number') retryAfter = data.retryAfter;
-      throw new RateLimitError(
-        data.error || 'Rate limit exceeded: Please wait before requesting another code.',
-        retryAfter
-      );
-    }
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || 'Failed to dispatch verification code.');
-    }
+    throw new Error('Password reset by SMS is not switched on yet. Please contact the portal administrator.');
   },
 
   async verifyPasswordResetOtpAndSetPassword(
@@ -1036,7 +1115,7 @@ export const api = {
       saveMockDB(db);
       return;
     }
-    // Real Edge Function call
+    throw new Error('Password reset by SMS is not switched on yet. Please contact the portal administrator.');
   },
 
   // --- SIGN UP OTP VERIFICATION ---
@@ -1137,7 +1216,7 @@ export const api = {
         phone: phoneE164,
         fullName,
         studentId,
-        turnstileToken: turnstileToken || 'turnstile-token-bypass-dev'
+        turnstileToken
       })
     });
 
@@ -1209,7 +1288,8 @@ export const api = {
       return true;
     }
 
-    await this.verifyOtp(phoneE164, code);
+    // Real mode: the register function checks the code when the account is created
+    pendingSignUpCode = { phone: phoneE164, code: code.trim() };
     return true;
   },
 
@@ -1516,8 +1596,40 @@ export const api = {
       const { password_hash, ...clean } = newUser;
       return clean;
     }
-    // Real Supabase Auth / signup Edge function
-    throw new Error('Real backend sign up not implemented');
+    // Real mode: ONE server call checks the SMS code, creates the login and saves the applicant
+    if (!pendingSignUpCode || pendingSignUpCode.phone !== params.phoneE164) {
+      throw new Error('Please verify your phone number first.');
+    }
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+      },
+      body: JSON.stringify({
+        phone: params.phoneE164,
+        code: pendingSignUpCode.code,
+        fullName: params.fullName,
+        email: params.email,
+        password: params.password,
+        studentId: params.traineeId,
+        level: params.level,
+        programme: params.programme
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || 'Could not create your account. Please try again.');
+    }
+    pendingSignUpCode = null;
+    return {
+      id: '',
+      email: params.email,
+      full_name: params.fullName,
+      phone_e164: params.phoneE164,
+      role: 'applicant',
+      status: data.status
+    } as unknown as TraineeUser;
   },
 
   // --- CSV EXPORT (Formula neutralisation as specified) ---

@@ -20,7 +20,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [pendingSuperAdminUser, setPendingSuperAdminUser] = useState<TraineeUser | null>(null);
 
   useEffect(() => {
-    // Check session
+    // Real mode: Supabase keeps the sign-in, so just pick it up again after a refresh
+    if (!api.isMock()) {
+      let active = true;
+      api
+        .restoreRealSession()
+        .then((restored) => {
+          if (active && restored) setUser(restored);
+        })
+        .catch(console.warn)
+        .finally(() => {
+          if (active) setIsLoading(false);
+        });
+      const stopListening = api.onRealAuthChange((signedIn) => {
+        if (!signedIn) setUser(null);
+      });
+      return () => {
+        active = false;
+        stopListening();
+      };
+    }
+
+    // Mock mode: check session
     const session = api.getCurrentSession();
     if (session && session.user) {
       setUser(session.user);
@@ -44,6 +65,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     identifier: string,
     password: string
   ): Promise<{ requiresMfa?: boolean; error?: string }> => {
+    // Real mode: Supabase checks the email and password. Admins come from the staff table.
+    if (!api.isMock()) {
+      try {
+        const realUser = await api.realLogin(identifier, password);
+        setUser(realUser);
+        return {};
+      } catch (err: any) {
+        return { error: err?.message || 'Sign-in failed. Please try again.' };
+      }
+    }
+
     const cleanId = identifier.trim().toLowerCase();
 
     // Check for Super Admin special login:

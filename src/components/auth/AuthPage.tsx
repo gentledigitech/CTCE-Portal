@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { api, RateLimitError } from '../../lib/api';
 import { validateGhanaPhone, validateStudentId, validateFullName } from '../../lib/validators';
+import { TurnstileWidget } from './TurnstileWidget';
 import {
   Lock,
   Mail,
@@ -111,12 +112,20 @@ export const AuthPage: React.FC = () => {
   const [resetSuccess, setResetSuccess] = useState<string | null>(null);
   const [isRequestingReset, setIsRequestingReset] = useState(false);
 
+  // Security check (Cloudflare Turnstile). A token only works once, so it is refreshed after every use.
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileReset, setTurnstileReset] = useState(0);
+  const refreshSecurityCheck = () => {
+    setTurnstileToken(null);
+    setTurnstileReset((n) => n + 1);
+  };
+
   // Handle Login Submit
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
     if (!loginIdentifier.trim() || !loginPassword) {
-      setLoginError('Please enter both your Email / Trainee ID and password.');
+      setLoginError('Please enter both your email address and password.');
       return;
     }
 
@@ -185,8 +194,8 @@ export const AuthPage: React.FC = () => {
     }
 
     // Passwords match
-    if (signUpPassword.length < 6) {
-      setSignUpError('Password must be at least 6 characters.');
+    if (signUpPassword.length < 8) {
+      setSignUpError('Password must be at least 8 characters.');
       return;
     }
     if (signUpPassword !== signUpConfirmPassword) {
@@ -212,10 +221,16 @@ export const AuthPage: React.FC = () => {
       return;
     }
 
+    const securityToken = api.isMock() ? 'mock' : turnstileToken;
+    if (!securityToken) {
+      setSignUpError('Please complete the security check above the button.');
+      return;
+    }
+
     setIsSubmittingSignUp(true);
     try {
       // Auto-generate 6-digit verification code and dispatch via SMS
-      await api.requestSignUpOtp(phoneVal.normalized, signUpFullName, signUpTraineeId);
+      await api.requestSignUpOtp(phoneVal.normalized, signUpFullName, signUpTraineeId, securityToken);
       setResendCountdown(60);
       setSignUpStep('verify-phone');
       setSignUpSuccess('A 6-digit verification code has been dispatched to your phone contact.');
@@ -228,6 +243,7 @@ export const AuthPage: React.FC = () => {
         setSignUpError(err.message || 'Failed to dispatch verification code.');
       }
     } finally {
+      refreshSecurityCheck();
       setIsSubmittingSignUp(false);
     }
   };
@@ -237,6 +253,11 @@ export const AuthPage: React.FC = () => {
     if (resendCountdown > 0 || isResending) return;
     setSignUpError(null);
     setSignUpSuccess(null);
+    const securityToken = api.isMock() ? 'mock' : turnstileToken;
+    if (!securityToken) {
+      setSignUpError('Please complete the security check before requesting a new code.');
+      return;
+    }
     setIsResending(true);
     try {
       const phoneVal = validateGhanaPhone(signUpPhone);
@@ -244,7 +265,7 @@ export const AuthPage: React.FC = () => {
         setSignUpError('Invalid phone number.');
         return;
       }
-      await api.requestSignUpOtp(phoneVal.normalized, signUpFullName, signUpTraineeId);
+      await api.requestSignUpOtp(phoneVal.normalized, signUpFullName, signUpTraineeId, securityToken);
       setSignUpSuccess('A new 6-digit verification code has been dispatched via SMS.');
       setResendCountdown(60);
     } catch (err: any) {
@@ -256,6 +277,7 @@ export const AuthPage: React.FC = () => {
         setSignUpError(err.message || 'Failed to resend verification code.');
       }
     } finally {
+      refreshSecurityCheck();
       setIsResending(false);
     }
   };
@@ -378,8 +400,8 @@ export const AuthPage: React.FC = () => {
       setResetError('Please enter the 6-digit verification code sent via SMS.');
       return;
     }
-    if (resetNewPassword.length < 6) {
-      setResetError('New password must be at least 6 characters long.');
+    if (resetNewPassword.length < 8) {
+      setResetError('New password must be at least 8 characters long.');
       return;
     }
     if (resetNewPassword !== resetConfirmPassword) {
@@ -706,7 +728,7 @@ export const AuthPage: React.FC = () => {
               <form onSubmit={handleLoginSubmit} className="space-y-4">
                 <div>
                   <label className="block text-xs font-bold text-stone-700 dark:text-stone-300 uppercase tracking-wider mb-1.5">
-                    Email or Trainee ID
+                    Email Address
                   </label>
                   <div className="relative">
                     <Mail className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -943,6 +965,8 @@ export const AuthPage: React.FC = () => {
                     </label>
                   </div>
 
+                  <TurnstileWidget onToken={setTurnstileToken} resetKey={turnstileReset} />
+
                   <button
                     type="submit"
                     disabled={isSubmittingSignUp}
@@ -1001,6 +1025,8 @@ export const AuthPage: React.FC = () => {
                     <CheckCircle2 className="w-4 h-4 text-sky-300" />
                     {isSubmittingSignUp ? 'Verifying & Creating...' : 'Verify Code & Create Account'}
                   </button>
+
+                  <TurnstileWidget onToken={setTurnstileToken} resetKey={turnstileReset} />
 
                   <div className="flex items-center justify-between text-xs pt-1">
                     <button

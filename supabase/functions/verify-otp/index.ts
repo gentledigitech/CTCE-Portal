@@ -7,6 +7,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { corsHeaders, handleCors } from '../_shared/cors.ts';
+import { requireEnv } from '../_shared/env.ts';
 import { sendArkeselSms } from '../_shared/sms.ts';
 import { hashOtpCode, constantTimeCompare } from '../_shared/otp.ts';
 import { createSessionToken } from '../_shared/session.ts';
@@ -35,8 +36,12 @@ serve(async (req: Request) => {
       });
     }
 
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    // Strictly require environment variables without fallback defaults
+    const supabaseUrl = requireEnv('SUPABASE_URL');
+    const supabaseServiceKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
+    const pepper = requireEnv('OTP_PEPPER');
+    const jwtSecret = requireEnv('SESSION_JWT_SECRET');
+
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // Retrieve active OTP record
@@ -75,7 +80,6 @@ serve(async (req: Request) => {
     }
 
     // Hash user-submitted code and compare in constant time
-    const pepper = Deno.env.get('OTP_PEPPER') || 'dev-pepper-secret';
     const computedHash = await hashOtpCode(code.trim(), pepper);
 
     if (!constantTimeCompare(computedHash, otpRecord.code_hash)) {
@@ -164,7 +168,6 @@ serve(async (req: Request) => {
     }
 
     // Issue 30-minute JWT token
-    const jwtSecret = Deno.env.get('SESSION_JWT_SECRET') || 'dev-session-jwt-secret';
     const token = await createSessionToken(applicant.id, 'applicant', jwtSecret);
 
     return new Response(

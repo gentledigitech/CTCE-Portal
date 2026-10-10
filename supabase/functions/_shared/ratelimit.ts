@@ -4,6 +4,8 @@
  * Fails closed if the database check errors.
  */
 
+import { requireEnv } from './env.ts';
+
 // ============================================================================
 // RATE LIMIT CONFIGURATION CONSTANTS (Easily adjustable)
 // ============================================================================
@@ -26,11 +28,16 @@ export const RESEND_COOLDOWN_SECONDS = 60;
 /**
  * Hashes client IP with OTP_PEPPER using HMAC-SHA-256 before database storage.
  * Ensures privacy and prevents storing raw IP addresses in the database.
+ * Strictly requires pepper without fallback defaults.
  */
 export async function hashIpWithPepper(ip: string, pepper: string): Promise<string> {
+  if (!pepper || pepper.trim() === '') {
+    throw new Error('SECURITY VIOLATION: OTP_PEPPER is missing or empty.');
+  }
+
   const normalizedIp = (ip || '127.0.0.1').trim();
   const encoder = new TextEncoder();
-  const keyData = encoder.encode(pepper || 'fallback-dev-pepper');
+  const keyData = encoder.encode(pepper);
 
   const cryptoKey = await crypto.subtle.importKey(
     'raw',
@@ -113,9 +120,27 @@ export async function checkRateLimit(
 // ============================================================================
 // CLOUDFLARE TURNSTILE TOKEN VERIFICATION
 // ============================================================================
+/**
+ * Verifies Cloudflare Turnstile token.
+ * FAILS CLOSED on:
+ * - Missing, empty, or non-string token
+ * - Missing TURNSTILE_SECRET environment variable
+ * - Network exception or fetch error
+ * - Non-OK response from Cloudflare
+ * - Unsuccessful verification payload
+ */
 export async function verifyTurnstileToken(token: string, ip: string): Promise<boolean> {
-  const secret = Deno.env.get('TURNSTILE_SECRET');
-  if (!secret) return true; // Bypass in local development when TURNSTILE_SECRET is not configured
+  if (!token || typeof token !== 'string' || token.trim() === '') {
+    return false;
+  }
+
+  let secret: string;
+  try {
+    secret = requireEnv('TURNSTILE_SECRET');
+  } catch (err) {
+    console.error('[Turnstile] Missing required TURNSTILE_SECRET. Failing closed:', err);
+    return false;
+  }
 
   try {
     const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
@@ -123,13 +148,20 @@ export async function verifyTurnstileToken(token: string, ip: string): Promise<b
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         secret,
-        response: token,
+        response: token.trim(),
         remoteip: ip
       })
     });
+
+    if (!res.ok) {
+      console.error('[Turnstile] Cloudflare siteverify returned non-OK status:', res.status);
+      return false;
+    }
+
     const outcome = await res.json();
-    return outcome.success === true;
-  } catch {
+    return Boolean(outcome && outcome.success === true);
+  } catch (err) {
+    console.error('[Turnstile] Network error contacting Cloudflare. Failing closed:', err);
     return false;
   }
 }

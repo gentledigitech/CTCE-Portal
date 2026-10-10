@@ -3,7 +3,7 @@
  * REST API client calling https://sms.arkesel.com/api/v2/sms/send
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
+import { requireEnv } from './env.ts';
 
 interface SendSmsOptions {
   recipientE164: string; // e.g. +233241234567
@@ -14,7 +14,7 @@ interface SendSmsOptions {
 }
 
 interface ArkeselResponse {
-  status: string; // TODO( verify ) against developers.arkesel.com: status field type
+  status: string;
   data?: any;
   message?: string;
 }
@@ -32,8 +32,9 @@ export async function sendArkeselSms({
   applicantId,
   supabaseClient
 }: SendSmsOptions): Promise<{ success: boolean; providerStatus?: string; error?: string }> {
-  const apiKey = Deno.env.get('ARKESEL_API_KEY');
-  const senderId = Deno.env.get('ARKESEL_SENDER_ID') || 'CTCE SRC';
+  // Strictly require environment variables without fallback defaults
+  const apiKey = requireEnv('ARKESEL_API_KEY');
+  const senderId = requireEnv('ARKESEL_SENDER_ID');
 
   // Convert +233XXXXXXXXX to 233XXXXXXXXX
   const recipientFormatted = recipientE164.replace(/^\+/, '');
@@ -41,25 +42,12 @@ export async function sendArkeselSms({
   // Truncate message to avoid multi-part charges if needed (plain GSM)
   const sanitizedMessage = message.trim();
 
-  // Redacted preview for database logging (never store plaintext OTP codes)
-  const isOtp = kind === 'otp' || kind === 'password_reset';
-  const logPreview = isOtp
-    ? 'CTCE Hall Portal: your code is [REDACTED]. It expires in 5 minutes. Do not share it.'
-    : sanitizedMessage.slice(0, 140);
-
   let httpStatus = 0;
   let providerStatus = 'unknown';
   let providerMessageId = '';
   let errorMessage = '';
 
   try {
-    if (!apiKey) {
-      console.warn('ARKESEL_API_KEY is not configured in environment. Simulating dispatch.');
-      providerStatus = 'simulated';
-      return { success: true, providerStatus };
-    }
-
-    // TODO( verify ): Check exact Arkesel v2 endpoint and JSON payload fields at developers.arkesel.com
     const response = await fetch('https://sms.arkesel.com/api/v2/sms/send', {
       method: 'POST',
       headers: {
@@ -68,7 +56,7 @@ export async function sendArkeselSms({
       },
       body: JSON.stringify({
         sender: senderId,
-        recipients: [recipientFormatted], // TODO( verify ): Check if array or comma-separated string
+        recipients: [recipientFormatted],
         message: sanitizedMessage
       })
     });
@@ -106,7 +94,7 @@ export async function sendArkeselSms({
   }
 
   return {
-    success: providerStatus === 'delivered' || providerStatus === 'simulated',
+    success: providerStatus === 'delivered',
     providerStatus,
     error: errorMessage || undefined
   };

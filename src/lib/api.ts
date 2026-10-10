@@ -127,14 +127,14 @@ function loadMockDB(): MockDatabase {
       if (superAdminIndex === -1) {
         parsed.users.unshift(getSuperAdminSeed());
       } else {
-        // Update super admin with latest profile parameters specified by user
+        // Keep existing saved state (like level, status, edits), only ensuring base profile defaults
+        const existing = parsed.users[superAdminIndex];
         parsed.users[superAdminIndex] = {
-          ...parsed.users[superAdminIndex],
-          full_name: 'Owusu Justice',
-          level: 200,
-          trainee_id: 'CTCE/JHS/25/0151',
-          phone_e164: '+233538965236',
-          programme: 'Bachelor of Education (Junior High School)'
+          ...existing,
+          full_name: existing.full_name || 'Owusu Justice',
+          trainee_id: existing.trainee_id || 'CTCE/JHS/25/0151',
+          phone_e164: existing.phone_e164 || '+233538965236',
+          programme: existing.programme || 'Bachelor of Education (Junior High School)'
         };
       }
       return parsed;
@@ -216,8 +216,51 @@ function refreshOccupancies() {
 }
 refreshOccupancies();
 
-// In-memory session holder
-let currentMemorySession: AuthSession | null = null;
+// Session storage persistence helper
+const SESSION_STORAGE_KEY = 'ctce_auth_session_v5';
+
+function loadStoredSession(): AuthSession | null {
+  try {
+    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed: AuthSession = JSON.parse(raw);
+    if (parsed && typeof parsed.expires_at === 'number' && parsed.expires_at > Date.now()) {
+      return parsed;
+    }
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  } catch (err) {
+    console.warn('Could not read stored session from sessionStorage:', err);
+  }
+  return null;
+}
+
+function saveStoredSession(session: AuthSession | null) {
+  try {
+    if (session) {
+      sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+      if (session.token) {
+        if (session.user?.role === 'viewer') {
+          sessionStorage.setItem('viewer_token', session.token);
+          sessionStorage.setItem('viewer_token_expires_at', session.expires_at.toString());
+        } else if (session.user?.role === 'applicant') {
+          sessionStorage.setItem('applicant_token', session.token);
+          sessionStorage.setItem('applicant_token_expires_at', session.expires_at.toString());
+        }
+      }
+    } else {
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      sessionStorage.removeItem('applicant_token');
+      sessionStorage.removeItem('applicant_token_expires_at');
+      sessionStorage.removeItem('viewer_token');
+      sessionStorage.removeItem('viewer_token_expires_at');
+    }
+  } catch (err) {
+    console.warn('Could not save session to sessionStorage:', err);
+  }
+}
+
+// Active session holder (restored from sessionStorage on reload)
+let currentMemorySession: AuthSession | null = loadStoredSession();
 
 export const api = {
   isMock(): boolean {
@@ -228,16 +271,23 @@ export const api = {
     if (currentMemorySession && currentMemorySession.expires_at > Date.now()) {
       return currentMemorySession;
     }
+    const stored = loadStoredSession();
+    if (stored) {
+      currentMemorySession = stored;
+      return currentMemorySession;
+    }
     currentMemorySession = null;
     return null;
   },
 
   setMemorySession(session: AuthSession | null) {
     currentMemorySession = session;
+    saveStoredSession(session);
   },
 
   logout(): void {
     currentMemorySession = null;
+    saveStoredSession(null);
   },
 
   // --- SETTINGS & SYSTEM STATE ---
@@ -614,7 +664,7 @@ export const api = {
     return data;
   },
 
-  async resendHallSms(applicantId: string): Promise<void> {
+  async resendHallSms(applicantId: string, turnstileToken?: string): Promise<void> {
     if (USE_MOCK) {
       const applicant = db.users.find((u) => u.id === applicantId);
       if (!applicant || !applicant.hall_name) {
@@ -639,7 +689,82 @@ export const api = {
       saveMockDB(db);
       return;
     }
-    // Call Edge Function
+
+    // Real Edge Function call
+    const token = sessionStorage.getItem('applicant_token');
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/resend-hall-sms`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token || SUPABASE_ANON_KEY}`
+      },
+      body: JSON.stringify({
+        applicantId,
+        turnstileToken: turnstileToken || 'turnstile-token-bypass-dev'
+      })
+    });
+
+    if (res.status === 429) {
+      const retryHeader = res.headers.get('Retry-After');
+      const data = await res.json().catch(() => ({}));
+      throw new RateLimitError(
+        data.error || 'Rate limit reached: Please wait before requesting another SMS.',
+        retryHeader ? parseInt(retryHeader, 10) : RESEND_COOLDOWN_SECONDS
+      );
+    }
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Failed to resend hall allocation SMS.');
+    }
+  },
+
+  async getMyHall(token?: string): Promise<any> {
+    if (USE_MOCK) {
+      const session = this.getCurrentSession();
+      if (!session || !session.user) throw new Error('Not authenticated.');
+      return {
+        applicant: {
+          id: session.user.id,
+          fullName: session.user.full_name,
+          applicantRef: session.user.trainee_id || session.user.id,
+          status: session.user.status,
+          hall: session.user.hall_name
+            ? {
+                id: session.user.hall_id,
+                name: session.user.hall_name,
+                colour: session.user.hall_colour
+              }
+            : null
+        }
+      };
+    }
+
+    const sessionToken = token || sessionStorage.getItem('applicant_token');
+    if (!sessionToken) {
+      throw new Error('Unauthorized: No active applicant session token found.');
+    }
+
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/get-my-hall`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionToken}`
+      }
+    });
+
+    if (res.status === 401) {
+      sessionStorage.removeItem('applicant_token');
+      sessionStorage.removeItem('applicant_token_expires_at');
+      throw new Error('Applicant session expired. Please verify your phone again.');
+    }
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Failed to retrieve hall allocation.');
+    }
+
+    return await res.json();
   },
 
   // --- SMS LOGS & BULK SMS ---
@@ -955,6 +1080,43 @@ export const api = {
     }
   },
 
+  async verifyOtp(phoneE164: string, code: string): Promise<any> {
+    if (USE_MOCK) {
+      const entry = db.otps.find((o) => o.phone === phoneE164 && (o.purpose === 'signup' || o.purpose === 'applicant'));
+      if (!entry || entry.expires_at < Date.now()) {
+        throw new Error('Verification code has expired or is invalid. Please request a new code.');
+      }
+      if (entry.code !== code.trim()) {
+        throw new Error('Incorrect verification code. Please check and re-enter.');
+      }
+      db.otps = db.otps.filter((o) => o !== entry);
+      saveMockDB(db);
+      return { success: true };
+    }
+
+    // Real Edge Function call: verify-otp
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/verify-otp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+      },
+      body: JSON.stringify({ phone: phoneE164, code: code.trim() })
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Verification failed.');
+    }
+
+    const data = await res.json();
+    if (data.token) {
+      sessionStorage.setItem('applicant_token', data.token);
+      sessionStorage.setItem('applicant_token_expires_at', (Date.now() + 30 * 60 * 1000).toString());
+    }
+    return data;
+  },
+
   async verifySignUpOtp(phoneE164: string, code: string): Promise<boolean> {
     if (USE_MOCK) {
       const entry = db.otps.find((o) => o.phone === phoneE164 && o.purpose === 'signup');
@@ -968,7 +1130,165 @@ export const api = {
       saveMockDB(db);
       return true;
     }
+
+    await this.verifyOtp(phoneE164, code);
     return true;
+  },
+
+  // --- VIEWER FUNCTIONS (EDGE FUNCTIONS) ---
+  async viewerRequestOtp(phoneE164: string, turnstileToken?: string): Promise<void> {
+    if (USE_MOCK) {
+      const viewer = db.users.find(
+        (u) => !u.deleted && u.phone_e164 === phoneE164 && (u.role === 'viewer' || u.role === 'admin' || u.role === 'super_admin')
+      );
+      if (!viewer) {
+        throw new Error('No active Viewer account found registered with this phone number.');
+      }
+      const now = Date.now();
+      const code = '123456';
+      db.otps = db.otps.filter((o) => !(o.phone === phoneE164 && o.purpose === 'viewer'));
+      db.otps.push({
+        phone: phoneE164,
+        code,
+        expires_at: now + 5 * 60 * 1000,
+        purpose: 'viewer',
+        created_at: now
+      });
+      sessionStorage.setItem(`mock_viewer_otp_${phoneE164}`, code);
+      saveMockDB(db);
+      return;
+    }
+
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/viewer-request-otp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+      },
+      body: JSON.stringify({
+        phone: phoneE164,
+        turnstileToken: turnstileToken || 'viewer-turnstile-token'
+      })
+    });
+
+    if (res.status === 429) {
+      const retryHeader = res.headers.get('Retry-After');
+      const data = await res.json().catch(() => ({}));
+      throw new RateLimitError(
+        data.error || 'Rate limit reached: Maximum 4 SMS codes per hour.',
+        retryHeader ? parseInt(retryHeader, 10) : RESEND_COOLDOWN_SECONDS
+      );
+    }
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Failed to request Viewer verification code.');
+    }
+  },
+
+  async viewerVerifyOtp(phoneE164: string, code: string, turnstileToken?: string): Promise<any> {
+    if (USE_MOCK) {
+      const viewer = db.users.find(
+        (u) => !u.deleted && u.phone_e164 === phoneE164 && (u.role === 'viewer' || u.role === 'admin' || u.role === 'super_admin')
+      );
+      if (!viewer) {
+        throw new Error('Viewer account not found.');
+      }
+      const entry = db.otps.find((o) => o.phone === phoneE164 && o.purpose === 'viewer');
+      if (!entry || entry.expires_at < Date.now()) {
+        throw new Error('Verification code has expired or is invalid.');
+      }
+      if (entry.code !== code.trim()) {
+        throw new Error('Incorrect verification code. Please check and re-enter.');
+      }
+      db.otps = db.otps.filter((o) => o !== entry);
+      saveMockDB(db);
+
+      const session: AuthSession = {
+        token: `mock-viewer-token-${Date.now()}`,
+        user: viewer,
+        expires_at: Date.now() + 30 * 60 * 1000
+      };
+      this.setMemorySession(session);
+      return { token: session.token, viewer: { id: viewer.id, fullName: viewer.full_name, role: 'viewer' } };
+    }
+
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/viewer-verify-otp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+      },
+      body: JSON.stringify({
+        phone: phoneE164,
+        code: code.trim(),
+        turnstileToken
+      })
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Viewer verification failed.');
+    }
+
+    const data = await res.json();
+    if (data.token) {
+      sessionStorage.setItem('viewer_token', data.token);
+      sessionStorage.setItem('viewer_token_expires_at', (Date.now() + 30 * 60 * 1000).toString());
+    }
+    return data;
+  },
+
+  async viewerSearch(query: string): Promise<any[]> {
+    if (USE_MOCK) {
+      const q = query.trim().toLowerCase();
+      const list = db.users.filter((u) => !u.deleted && u.status === 'allocated');
+      const filtered = q
+        ? list.filter(
+            (u) =>
+              u.full_name.toLowerCase().includes(q) ||
+              (u.trainee_id && u.trainee_id.toLowerCase().includes(q))
+          )
+        : list;
+
+      return filtered.map((u) => ({
+        fullName: u.full_name,
+        applicantRef: u.trainee_id || u.id,
+        maskedPhone: u.phone_e164
+          ? `+233 ${u.phone_e164.slice(4, 6)} *** **${u.phone_e164.slice(-2)}`
+          : '+233 ** *** **00',
+        hallName: u.hall_name || 'Unallocated',
+        hallColour: u.hall_colour || 'neutral'
+      }));
+    }
+
+    const token = sessionStorage.getItem('viewer_token');
+    if (!token) {
+      throw new Error('Unauthorized: Missing Viewer session token.');
+    }
+
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/viewer-search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({ query })
+    });
+
+    if (res.status === 401 || res.status === 403) {
+      sessionStorage.removeItem('viewer_token');
+      sessionStorage.removeItem('viewer_token_expires_at');
+      throw new Error('Viewer session expired or unauthorized. Please verify your phone again.');
+    }
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Viewer search failed.');
+    }
+
+    const data = await res.json();
+    return data.results || [];
   },
 
   // --- SIGN UP ---

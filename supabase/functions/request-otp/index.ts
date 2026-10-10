@@ -1,13 +1,16 @@
 /**
  * Edge Function: request-otp
- * Generates 6-digit OTP, verifies Turnstile, enforces per-IP (max 4/hr) and per-Phone (max 3/hr)
- * rate limits via atomic check_rate_limit SQL function, and calls Arkesel to send plain SMS.
- * Fails closed if rate limit check errors. Returns HTTP 429 with Retry-After header on limit breach.
+ * Generates 6-digit OTP, strictly verifies Turnstile token, enforces per-IP (max 4/hr)
+ * and per-Phone (max 3/hr) rate limits via atomic check_rate_limit SQL function,
+ * and calls Arkesel to send plain SMS.
+ * Fails closed if rate limit check or Turnstile check errors.
+ * Returns HTTP 429 with Retry-After header on limit breach.
  */
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { corsHeaders, handleCors } from '../_shared/cors.ts';
+import { requireEnv } from '../_shared/env.ts';
 import { sendArkeselSms } from '../_shared/sms.ts';
 import { generateCryptographicOtp, hashOtpCode } from '../_shared/otp.ts';
 import {
@@ -36,15 +39,24 @@ serve(async (req: Request) => {
       req.headers.get('x-real-ip') ||
       '127.0.0.1';
 
-    // Verify Cloudflare Turnstile token if provided
-    if (turnstileToken) {
-      const isTurnstileValid = await verifyTurnstileToken(turnstileToken, clientIp);
-      if (!isTurnstileValid) {
-        return new Response(JSON.stringify({ error: 'Security verification failed.' }), {
+    // REQUIRE turnstileToken: MUST NOT be missing, empty or not a string. No skip!
+    if (!turnstileToken || typeof turnstileToken !== 'string' || turnstileToken.trim() === '') {
+      return new Response(
+        JSON.stringify({ error: 'Security verification token (turnstileToken) is required.' }),
+        {
           status: 400,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      }
+        }
+      );
+    }
+
+    // Verify Cloudflare Turnstile token (fails closed on missing secret, network error, or non-OK response)
+    const isTurnstileValid = await verifyTurnstileToken(turnstileToken, clientIp);
+    if (!isTurnstileValid) {
+      return new Response(JSON.stringify({ error: 'Security verification failed.' }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
     }
 
     // Validate and normalize Ghanaian phone number
@@ -58,11 +70,12 @@ serve(async (req: Request) => {
 
     const phoneE164 = phoneValidation.normalized;
 
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    // Strictly require environment variables without fallback defaults
+    const supabaseUrl = requireEnv('SUPABASE_URL');
+    const supabaseServiceKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
+    const pepper = requireEnv('OTP_PEPPER');
 
-    const pepper = Deno.env.get('OTP_PEPPER') || 'dev-pepper-secret';
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // =========================================================================
     // 1. ATOMIC PER-IP RATE LIMIT CHECK (RUNS BEFORE ANY ARKESEL CALL)

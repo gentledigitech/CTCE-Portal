@@ -40,18 +40,18 @@ export const AuthPage: React.FC = () => {
   // Active countdown timers
   useEffect(() => {
     if (resendCountdown <= 0) return;
-    const timer = setInterval(() => {
+    const timer = setTimeout(() => {
       setResendCountdown((prev) => (prev > 0 ? prev - 1 : 0));
     }, 1000);
-    return () => clearInterval(timer);
+    return () => clearTimeout(timer);
   }, [resendCountdown]);
 
   useEffect(() => {
     if (resetCountdown <= 0) return;
-    const timer = setInterval(() => {
+    const timer = setTimeout(() => {
       setResetCountdown((prev) => (prev > 0 ? prev - 1 : 0));
     }, 1000);
-    return () => clearInterval(timer);
+    return () => clearTimeout(timer);
   }, [resetCountdown]);
 
   // Format seconds to mm:ss or ss

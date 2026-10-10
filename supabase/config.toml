@@ -1,0 +1,25 @@
+project_id = "pvkeropaviefewlctlxr"
+
+[functions.admin-create-admin]
+verify_jwt = true
+
+[functions.request-otp]
+verify_jwt = false
+
+[functions.verify-otp]
+verify_jwt = false
+
+[functions.get-my-hall]
+verify_jwt = false
+
+[functions.resend-hall-sms]
+verify_jwt = false
+
+[functions.viewer-request-otp]
+verify_jwt = false
+
+[functions.viewer-verify-otp]
+verify_jwt = false
+
+[functions.viewer-search]
+verify_jwt = false

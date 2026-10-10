@@ -6,6 +6,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { corsHeaders, handleCors } from '../_shared/cors.ts';
+import { requireEnv } from '../_shared/env.ts';
 
 serve(async (req: Request) => {
   const corsResponse = handleCors(req);
@@ -20,8 +21,8 @@ serve(async (req: Request) => {
       });
     }
 
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    const supabaseUrl = requireEnv('SUPABASE_URL');
+    const supabaseServiceKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // Verify caller is Super Admin

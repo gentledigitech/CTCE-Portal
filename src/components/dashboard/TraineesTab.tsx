@@ -44,21 +44,48 @@ export const TraineesTab: React.FC<TraineesTabProps> = ({
 
   const isStaff = user.role === 'admin' || user.role === 'super_admin';
   const isSuperAdmin = user.role === 'super_admin';
+  const isViewer = user.role === 'viewer';
+  const [viewerResults, setViewerResults] = useState<any[] | null>(null);
+
+  React.useEffect(() => {
+    if (isViewer && !api.isMock()) {
+      api.viewerSearch(searchTerm)
+        .then((res) => setViewerResults(res))
+        .catch((err) => console.warn('Viewer search edge function error:', err));
+    }
+  }, [isViewer, searchTerm]);
 
   // Filter trainees
-  const filtered = trainees.filter((t) => {
-    // Only show un-deleted unless super admin is viewing
-    const matchesSearch =
-      t.full_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (t.trainee_id && t.trainee_id.toLowerCase().includes(searchTerm.toLowerCase())) ||
-      (t.hall_name && t.hall_name.toLowerCase().includes(searchTerm.toLowerCase()));
+  const filtered: TraineeUser[] = (isViewer && viewerResults)
+    ? viewerResults.map((r, idx): TraineeUser => ({
+        id: `viewer-${idx}`,
+        email: 'hidden@ctce.edu.gh',
+        phone_e164: r.maskedPhone,
+        full_name: r.fullName,
+        trainee_id: r.applicantRef,
+        programme: 'Trainee',
+        level: 100,
+        role: 'applicant',
+        status: 'allocated',
+        hall_name: r.hallName,
+        hall_colour: r.hallColour,
+        hall_sms_count: 0,
+        passport_url: undefined,
+        created_at: new Date().toISOString()
+      }))
+    : trainees.filter((t) => {
+        // Only show un-deleted unless super admin is viewing
+        const matchesSearch =
+          t.full_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          (t.trainee_id && t.trainee_id.toLowerCase().includes(searchTerm.toLowerCase())) ||
+          (t.hall_name && t.hall_name.toLowerCase().includes(searchTerm.toLowerCase()));
 
-    const matchesStatus =
-      statusFilter === 'all' ||
-      t.status === statusFilter;
+        const matchesStatus =
+          statusFilter === 'all' ||
+          t.status === statusFilter;
 
-    return matchesSearch && matchesStatus;
-  });
+        return matchesSearch && matchesStatus;
+      });
 
   // Export CSV
   const handleExportCsv = () => {
@@ -213,7 +240,7 @@ export const TraineesTab: React.FC<TraineesTabProps> = ({
                     <div className="w-full h-full flex items-center justify-center font-bold text-xs text-emerald-800">
                       {item.full_name
                         .split(' ')
-                        .map((n) => n[0])
+                        .map((n: string) => n[0])
                         .slice(0, 2)
                         .join('')
                         .toUpperCase()}

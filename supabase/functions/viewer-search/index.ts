@@ -8,6 +8,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { corsHeaders, handleCors } from '../_shared/cors.ts';
+import { requireEnv } from '../_shared/env.ts';
 import { verifySessionToken } from '../_shared/session.ts';
 
 function maskPhoneNumber(phone: string): string {
@@ -34,7 +35,7 @@ serve(async (req: Request) => {
     }
 
     const token = authHeader.split(' ')[1];
-    const jwtSecret = Deno.env.get('SESSION_JWT_SECRET') || 'dev-session-jwt-secret';
+    const jwtSecret = requireEnv('SESSION_JWT_SECRET');
     const session = await verifySessionToken(token, jwtSecret);
 
     if (!session || (session.role !== 'viewer' && session.role !== 'admin' && session.role !== 'super_admin')) {
@@ -47,8 +48,8 @@ serve(async (req: Request) => {
     const { query } = await req.json();
     const searchTerm = query ? query.trim() : '';
 
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    const supabaseUrl = requireEnv('SUPABASE_URL');
+    const supabaseServiceKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     let queryBuilder = supabase

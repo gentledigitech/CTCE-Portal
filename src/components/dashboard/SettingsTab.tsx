@@ -30,7 +30,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   halls,
   onRefreshData
 }) => {
-  const { user, updateCurrentUserProfile } = useAuth();
+  const { user, updateCurrentUserProfile, refreshUser } = useAuth();
 
   // User Profile Form
   const [fullName, setFullName] = useState(user?.full_name || '');
@@ -159,6 +159,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         },
         user.id
       );
+      await refreshUser();
       await onRefreshData();
       setSettingsMsg({
         type: 'success',

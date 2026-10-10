@@ -221,15 +221,20 @@ const SESSION_STORAGE_KEY = 'ctce_auth_session_v5';
 
 function loadStoredSession(): AuthSession | null {
   try {
-    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY) || localStorage.getItem(SESSION_STORAGE_KEY);
     if (!raw) return null;
     const parsed: AuthSession = JSON.parse(raw);
-    if (parsed && typeof parsed.expires_at === 'number' && parsed.expires_at > Date.now()) {
-      return parsed;
+    if (parsed && parsed.user) {
+      // Staff (admin & super_admin) stay logged in until explicit logout
+      const isStaff = parsed.user.role === 'admin' || parsed.user.role === 'super_admin';
+      if (isStaff || (typeof parsed.expires_at === 'number' && parsed.expires_at > Date.now())) {
+        return parsed;
+      }
     }
     sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    localStorage.removeItem(SESSION_STORAGE_KEY);
   } catch (err) {
-    console.warn('Could not read stored session from sessionStorage:', err);
+    console.warn('Could not read stored session from storage:', err);
   }
   return null;
 }
@@ -238,6 +243,10 @@ function saveStoredSession(session: AuthSession | null) {
   try {
     if (session) {
       sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+      // For staff, also persist in localStorage so refresh never logs them out
+      if (session.user?.role === 'admin' || session.user?.role === 'super_admin') {
+        localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+      }
       if (session.token) {
         if (session.user?.role === 'viewer') {
           sessionStorage.setItem('viewer_token', session.token);
@@ -249,18 +258,31 @@ function saveStoredSession(session: AuthSession | null) {
       }
     } else {
       sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      localStorage.removeItem(SESSION_STORAGE_KEY);
       sessionStorage.removeItem('applicant_token');
       sessionStorage.removeItem('applicant_token_expires_at');
       sessionStorage.removeItem('viewer_token');
       sessionStorage.removeItem('viewer_token_expires_at');
     }
   } catch (err) {
-    console.warn('Could not save session to sessionStorage:', err);
+    console.warn('Could not save session to storage:', err);
   }
 }
 
 // Active session holder (restored from sessionStorage on reload)
 let currentMemorySession: AuthSession | null = loadStoredSession();
+
+async function dispatchRealSms(recipient: string, message: string, kind = 'general') {
+  try {
+    await fetch('/api/send-sms', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipient, message, kind })
+    });
+  } catch (err) {
+    console.warn('[SMS Dispatch] Failed to send real SMS to provider:', err);
+  }
+}
 
 export const api = {
   isMock(): boolean {
@@ -306,10 +328,10 @@ export const api = {
       const oldYear = db.settings.current_academic_year;
       db.settings = { ...db.settings, ...updates };
 
-      // If Academic Year changed, promote trainees!
+      // If Academic Year changed, promote trainees and update levels!
       if (updates.current_academic_year && updates.current_academic_year !== oldYear) {
         db.users.forEach((user) => {
-          if (user.role === 'applicant' || user.role === 'viewer') {
+          if (typeof user.level === 'number') {
             if (user.level === 100) {
               user.level = 200;
             } else if (user.level === 200) {
@@ -317,11 +339,20 @@ export const api = {
             } else if (user.level === 300) {
               user.level = 400;
             } else if (user.level === 400) {
-              // Level 400 graduates! They will receive congratulation message
+              user.level = 500;
               user.status = 'graduated';
             }
           }
         });
+
+        // Sync active session user if currently logged in
+        if (currentMemorySession && currentMemorySession.user) {
+          const updatedActive = db.users.find((u) => u.id === currentMemorySession!.user.id);
+          if (updatedActive) {
+            currentMemorySession.user = { ...updatedActive };
+            saveStoredSession(currentMemorySession);
+          }
+        }
       }
 
       db.audit_logs.unshift({
@@ -590,6 +621,14 @@ export const api = {
       });
 
       saveMockDB(db);
+
+      // Dispatch real SMS to applicant phone
+      dispatchRealSms(
+        applicant.phone_e164,
+        `CTCE: Hello ${applicant.full_name.split(' ')[0]}, you have been allocated to ${chosenHall.name}. Show this message at hall registration.`,
+        'hall_allocation'
+      );
+
       return { hall: chosenHall, status: 'allocated' };
     }
     // Real Supabase RPC
@@ -687,6 +726,14 @@ export const api = {
       });
 
       saveMockDB(db);
+
+      // Dispatch real SMS to applicant phone
+      dispatchRealSms(
+        applicant.phone_e164,
+        `CTCE: Hello ${applicant.full_name.split(' ')[0]}, you have been allocated to ${applicant.hall_name}. Show this message at hall registration.`,
+        'hall_allocation'
+      );
+
       return;
     }
 
@@ -812,6 +859,12 @@ export const api = {
       });
 
       saveMockDB(db);
+
+      // Dispatch real SMS to all recipients
+      recipients.forEach((p) => {
+        dispatchRealSms(p, message.trim(), 'bulk');
+      });
+
       return { sentCount: recipients.length, unitsUsed: totalUnits };
     }
     // Real call via Edge Function
@@ -902,6 +955,14 @@ export const api = {
 
       sessionStorage.setItem(`mock_last_otp_${phoneE164}`, code);
       saveMockDB(db);
+
+      // Dispatch real SMS to phone
+      dispatchRealSms(
+        phoneE164,
+        `CTCE Hall Portal: your password reset verification code is ${code}. It expires in 5 minutes. Do not share it.`,
+        'password_reset'
+      );
+
       return;
     }
 
@@ -1045,6 +1106,14 @@ export const api = {
 
       sessionStorage.setItem(`mock_signup_otp_${phoneE164}`, code);
       saveMockDB(db);
+
+      // Dispatch real SMS to phone
+      dispatchRealSms(
+        phoneE164,
+        `CTCE Hall Portal: your registration verification code is ${code}. It expires in 5 minutes. Do not share it.`,
+        'otp'
+      );
+
       return;
     }
 
@@ -1156,6 +1225,14 @@ export const api = {
       });
       sessionStorage.setItem(`mock_viewer_otp_${phoneE164}`, code);
       saveMockDB(db);
+
+      // Dispatch real SMS to phone
+      dispatchRealSms(
+        phoneE164,
+        `CTCE Hall Portal: your Viewer access code is ${code}. It expires in 5 minutes. Do not share it.`,
+        'otp'
+      );
+
       return;
     }
 

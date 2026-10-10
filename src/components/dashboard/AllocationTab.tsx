@@ -43,6 +43,17 @@ export const AllocationTab: React.FC<AllocationTabProps> = ({
     return () => clearInterval(timer);
   }, [resendCooldown]);
 
+  // Query get-my-hall endpoint on result screen
+  useEffect(() => {
+    if (user && user.role === 'applicant') {
+      api.getMyHall().then((data) => {
+        if (data?.applicant && (data.applicant.status !== user.status || data.applicant.hall?.name !== user.hall_name)) {
+          refreshUser();
+        }
+      }).catch(() => {});
+    }
+  }, [user?.id, refreshUser]);
+
   // Admin / Super Admin Data Entry Form State (Step-by-step entry)
   const [entryFullName, setEntryFullName] = useState('');
   const [entryEmail, setEntryEmail] = useState('');

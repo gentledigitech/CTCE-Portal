@@ -41,31 +41,30 @@ export function validateGhanaPhone(input: string): PhoneValidationResult {
   const cleaned = input.trim().replace(/[\s\-()]/g, '');
 
   let e164 = '';
-  if (cleaned.startsWith('+233')) {
+  if (cleaned.startsWith('+')) {
     e164 = cleaned;
   } else if (cleaned.startsWith('233')) {
     e164 = `+${cleaned}`;
   } else if (cleaned.startsWith('0')) {
     e164 = `+233${cleaned.slice(1)}`;
-  } else if (/^(2[03-9]|5[03-9])\d{7}$/.test(cleaned)) {
+  } else if (/^\d{9}$/.test(cleaned)) {
     e164 = `+233${cleaned}`;
+  } else if (/^\d{10,15}$/.test(cleaned)) {
+    e164 = `+${cleaned}`;
   } else {
     return {
       isValid: false,
-      error: 'Invalid phone format. Must be a valid Ghanaian number (e.g. 024XXXXXXX or 050XXXXXXX).'
+      error: 'Invalid phone format. Please enter a valid mobile number (e.g. 0538965236 or 024XXXXXXX).'
     };
   }
 
-  // Strict E.164 Ghana mobile number check:
-  // Country code: +233
-  // Valid mobile prefixes: 20, 23, 24, 25, 26, 27, 28, 29, 50, 53, 54, 55, 56, 57, 58, 59
-  // Followed by 7 digits
-  const ghanaPhoneRegex = /^\+233(2[03-9]|5[03-9])\d{7}$/;
+  // Flexible phone check: + followed by 9 to 15 digits
+  const flexiblePhoneRegex = /^\+\d{9,15}$/;
 
-  if (!ghanaPhoneRegex.test(e164)) {
+  if (!flexiblePhoneRegex.test(e164)) {
     return {
       isValid: false,
-      error: 'Please enter a valid Ghanaian mobile number (MTN, Telecel, or AT).'
+      error: 'Please enter a valid phone contact number.'
     };
   }
 

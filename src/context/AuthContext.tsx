@@ -20,10 +20,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [pendingSuperAdminUser, setPendingSuperAdminUser] = useState<TraineeUser | null>(null);
 
   useEffect(() => {
-    // Check in-memory session
+    // Check session
     const session = api.getCurrentSession();
-    if (session) {
+    if (session && session.user) {
       setUser(session.user);
+      // Re-hydrate latest user details from DB so expected changes (level promotion, etc.) are reflected immediately on refresh!
+      api.getTrainees().then((all) => {
+        const freshUser = all.find((u) => u.id === session.user.id);
+        if (freshUser) {
+          session.user = freshUser;
+          api.setMemorySession(session);
+          setUser(freshUser);
+        }
+      }).catch(console.warn).finally(() => {
+        setIsLoading(false);
+      });
+      return;
     }
     setIsLoading(false);
   }, []);

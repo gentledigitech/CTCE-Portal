@@ -82,7 +82,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return { requiresMfa: true };
     }
 
-    if (fullUser && (fullUser.password_hash === password || password === 'Admin')) {
+    if (fullUser && fullUser.password_hash === password) {
       const session: AuthSession = {
         token: `session-token-${Date.now()}`,
         user: matched,

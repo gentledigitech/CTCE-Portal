@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
@@ -21,17 +22,19 @@ async function startServer() {
       }
 
       const apiKey = process.env.ARKESEL_API_KEY;
-      const senderId = sender || process.env.ARKESEL_SENDER_ID || 'CTCE SRC';
+      const senderId = (sender || process.env.ARKESEL_SENDER_ID || 'CTCE SRC').slice(0, 11);
 
       if (!apiKey) {
         console.warn('[Server SMS] ARKESEL_API_KEY is not configured in server environment.');
         return res.status(500).json({ error: 'SMS service configuration is missing on server.' });
       }
 
-      // Format recipient: normalize +233XXXXXXXXX or 0XXXXXXXXX to 233XXXXXXXXX
+      // Format recipient: normalize +233XXXXXXXXX, 0XXXXXXXXX, or +2330XXXXXXXXX to 233XXXXXXXXX
       let digits = recipient.replace(/\D/g, '');
       if (digits.startsWith('0') && digits.length === 10) {
         digits = '233' + digits.slice(1);
+      } else if (digits.startsWith('2330') && digits.length === 13) {
+        digits = '233' + digits.slice(4);
       } else if (!digits.startsWith('233') && digits.length === 9) {
         digits = '233' + digits;
       }

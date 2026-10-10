@@ -15,7 +15,8 @@ import {
   Shield,
   CheckCircle,
   Clock,
-  Filter
+  Filter,
+  AlertCircle
 } from 'lucide-react';
 
 interface TraineesTabProps {
@@ -46,18 +47,39 @@ export const TraineesTab: React.FC<TraineesTabProps> = ({
   const isSuperAdmin = user.role === 'super_admin';
   const isViewer = user.role === 'viewer';
   const [viewerResults, setViewerResults] = useState<any[] | null>(null);
+  const [viewerError, setViewerError] = useState<string | null>(null);
+  const [isSearchingViewer, setIsSearchingViewer] = useState(false);
 
   React.useEffect(() => {
-    if (isViewer && !api.isMock()) {
-      api.viewerSearch(searchTerm)
-        .then((res) => setViewerResults(res))
-        .catch((err) => console.warn('Viewer search edge function error:', err));
+    if (isViewer) {
+      const trimmed = searchTerm.trim();
+      if (trimmed.length >= 3) {
+        setIsSearchingViewer(true);
+        setViewerError(null);
+        api.viewerSearch(trimmed)
+          .then((res) => {
+            setViewerResults(res);
+            setViewerError(null);
+          })
+          .catch((err) => {
+            console.warn('Viewer search error:', err);
+            setViewerError(err.message || 'Search failed');
+            setViewerResults([]);
+          })
+          .finally(() => {
+            setIsSearchingViewer(false);
+          });
+      } else {
+        setViewerResults(null);
+        setIsSearchingViewer(false);
+        setViewerError(trimmed.length > 0 ? 'Please enter at least 3 characters to search.' : null);
+      }
     }
   }, [isViewer, searchTerm]);
 
   // Filter trainees
-  const filtered: TraineeUser[] = (isViewer && viewerResults)
-    ? viewerResults.map((r, idx): TraineeUser => ({
+  const filtered: TraineeUser[] = isViewer
+    ? (viewerResults || []).map((r, idx): TraineeUser => ({
         id: `viewer-${idx}`,
         email: 'hidden@ctce.edu.gh',
         phone_e164: r.maskedPhone,
@@ -193,7 +215,7 @@ export const TraineesTab: React.FC<TraineesTabProps> = ({
             <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search by name, Trainee ID, or hall..."
+              placeholder={isViewer ? "Enter at least 3 characters to search..." : "Search by name, Trainee ID, or hall..."}
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-stone-300 focus:border-emerald-600 text-sm min-h-[44px]"
@@ -213,6 +235,24 @@ export const TraineesTab: React.FC<TraineesTabProps> = ({
             </select>
           </div>
         </div>
+
+        {isViewer && (
+          <div className="pt-2 space-y-2">
+            <div className="p-3 bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 rounded-xl text-xs text-sky-900 dark:text-sky-200 flex items-center justify-between">
+              <span>
+                <strong>Viewer Access:</strong> Search requires at least 3 characters. Phone contacts are securely masked for privacy.
+              </span>
+              {isSearchingViewer && <span className="text-sky-600 font-semibold animate-pulse">Searching...</span>}
+            </div>
+
+            {viewerError && (
+              <div className="p-3 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 rounded-xl text-xs text-red-800 dark:text-red-200 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                <span>{viewerError}</span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Trainees List / Table (Vertical Mobile-Friendly Cards) */}

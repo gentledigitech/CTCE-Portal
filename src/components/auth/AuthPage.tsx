@@ -28,7 +28,16 @@ export const AuthPage: React.FC = () => {
   const { theme, toggleTheme } = useTheme();
 
   const [mode, setMode] = useState<AuthMode>('login');
+  const [logoSrc, setLogoSrc] = useState('/college-logo.png');
   const [logoError, setLogoError] = useState(false);
+
+  const handleLogoError = () => {
+    if (logoSrc === '/college-logo.png') {
+      setLogoSrc('https://lh3.googleusercontent.com/d/1oKmWTIanlo2adz7GWseEkQZayxA8NFBH');
+    } else {
+      setLogoError(true);
+    }
+  };
   const [showPassword, setShowPassword] = useState(false);
 
   // Countdown timer states for Resend SMS buttons
@@ -427,10 +436,10 @@ export const AuthPage: React.FC = () => {
           <div className="inline-block relative w-20 h-20 sm:w-24 sm:h-24 rounded-3xl bg-white/90 p-2 shadow-2xl border-2 border-sky-300/60 mb-3 overflow-hidden backdrop-blur-md">
             {!logoError ? (
               <img
-                src="https://lh3.googleusercontent.com/d/1oKmWTIanlo2adz7GWseEkQZayxA8NFBH"
-                alt="CTCE Crest"
+                src={logoSrc}
+                alt="CTCE College Logo"
                 referrerPolicy="no-referrer"
-                onError={() => setLogoError(true)}
+                onError={handleLogoError}
                 className="w-full h-full object-contain"
               />
             ) : (

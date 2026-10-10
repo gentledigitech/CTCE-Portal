@@ -127,6 +127,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const session = api.getCurrentSession();
       if (session) {
         session.user = current;
+        api.setMemorySession(session);
       }
     }
   };
@@ -138,6 +139,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const session = api.getCurrentSession();
     if (session) {
       session.user = updated;
+      api.setMemorySession(session);
     }
   };
 

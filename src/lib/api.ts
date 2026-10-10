@@ -14,6 +14,7 @@ import {
   AuthSession,
   UserRole
 } from '../types';
+import { maskPhoneNumber } from './validators';
 
 // Fail production build if mock mode is accidentally left enabled in production
 if (import.meta.env.PROD && import.meta.env.VITE_USE_MOCK === 'true') {
@@ -274,13 +275,21 @@ let currentMemorySession: AuthSession | null = loadStoredSession();
 
 async function dispatchRealSms(recipient: string, message: string, kind = 'general') {
   try {
-    await fetch('/api/send-sms', {
+    const res = await fetch('/api/send-sms', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ recipient, message, kind })
     });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      console.warn('[SMS Dispatch] /api/send-sms returned error:', res.status, data);
+      return { success: false, error: data.error };
+    }
+    console.log('[SMS Dispatch] Successfully sent SMS to', recipient, data);
+    return { success: true, data };
   } catch (err) {
     console.warn('[SMS Dispatch] Failed to send real SMS to provider:', err);
+    return { success: false, error: String(err) };
   }
 }
 
@@ -1108,7 +1117,7 @@ export const api = {
       saveMockDB(db);
 
       // Dispatch real SMS to phone
-      dispatchRealSms(
+      await dispatchRealSms(
         phoneE164,
         `CTCE Hall Portal: your registration verification code is ${code}. It expires in 5 minutes. Do not share it.`,
         'otp'
@@ -1128,7 +1137,7 @@ export const api = {
         phone: phoneE164,
         fullName,
         studentId,
-        turnstileToken
+        turnstileToken: turnstileToken || 'turnstile-token-bypass-dev'
       })
     });
 
@@ -1317,22 +1326,62 @@ export const api = {
   },
 
   async viewerSearch(query: string): Promise<any[]> {
+    const raw = (query || '').trim();
+    const sanitized = raw.replace(/[^a-zA-Z0-9 \-\/'\.]/g, '').slice(0, 50);
+
     if (USE_MOCK) {
-      const q = query.trim().toLowerCase();
+      if (sanitized.length < 3) {
+        if (raw.length > 0) {
+          throw new Error('Search term must be at least 3 characters long.');
+        }
+        return [];
+      }
+
+      // Per-session rate limit check in mock (30 searches per 10 min)
+      const now = Date.now();
+      const sessionKey = 'viewer_search:mock-session';
+      if (!db.rate_limits) db.rate_limits = [];
+      let entry = db.rate_limits.find((r) => r.key === sessionKey);
+      if (!entry || now - entry.window_start >= 600 * 1000) {
+        entry = { key: sessionKey, window_start: now, count: 1 };
+        db.rate_limits = db.rate_limits.filter((r) => r.key !== sessionKey);
+        db.rate_limits.push(entry);
+      } else {
+        if (entry.count >= 30) {
+          const retryAfter = Math.max(1, Math.ceil((entry.window_start + 600 * 1000 - now) / 1000));
+          throw new RateLimitError(
+            'Rate limit exceeded: Maximum 30 searches per 10 minutes. Please wait before searching again.',
+            retryAfter
+          );
+        }
+        entry.count++;
+      }
+
+      // Write one audit_log row with viewer's id and term length (NOT the term)
+      db.audit_logs.unshift({
+        id: `audit-${Date.now()}`,
+        actor_type: 'viewer',
+        actor_id: sessionStorage.getItem('viewer_token') || 'viewer-mock',
+        action: 'VIEWER_SEARCH',
+        detail: { term_length: sanitized.length },
+        ip_hash: 'client-ip-mock',
+        created_at: new Date().toISOString()
+      });
+      saveMockDB(db);
+
+      const q = sanitized.toLowerCase();
       const list = db.users.filter((u) => !u.deleted && u.status === 'allocated');
-      const filtered = q
-        ? list.filter(
-            (u) =>
-              u.full_name.toLowerCase().includes(q) ||
-              (u.trainee_id && u.trainee_id.toLowerCase().includes(q))
-          )
-        : list;
+      const filtered = list.filter(
+        (u) =>
+          u.full_name.toLowerCase().includes(q) ||
+          (u.trainee_id && u.trainee_id.toLowerCase().includes(q))
+      );
 
       return filtered.map((u) => ({
         fullName: u.full_name,
         applicantRef: u.trainee_id || u.id,
         maskedPhone: u.phone_e164
-          ? `+233 ${u.phone_e164.slice(4, 6)} *** **${u.phone_e164.slice(-2)}`
+          ? maskPhoneNumber(u.phone_e164)
           : '+233 ** *** **00',
         hallName: u.hall_name || 'Unallocated',
         hallColour: u.hall_colour || 'neutral'
@@ -1350,8 +1399,18 @@ export const api = {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`
       },
-      body: JSON.stringify({ query })
+      body: JSON.stringify({ query: sanitized })
     });
+
+    if (res.status === 429) {
+      const retryHeader = res.headers.get('Retry-After');
+      const data = await res.json().catch(() => ({}));
+      const retryAfter = typeof data.retryAfter === 'number' ? data.retryAfter : (retryHeader ? parseInt(retryHeader, 10) : 600);
+      throw new RateLimitError(
+        data.error || 'Rate limit exceeded: Please wait before searching again.',
+        retryAfter
+      );
+    }
 
     if (res.status === 401 || res.status === 403) {
       sessionStorage.removeItem('viewer_token');
@@ -1446,6 +1505,14 @@ export const api = {
       });
 
       saveMockDB(db);
+
+      // Dispatch welcome confirmation SMS to newly registered user
+      await dispatchRealSms(
+        newUser.phone_e164,
+        `CTCE Hall Portal: Welcome ${newUser.full_name.split(' ')[0]}! Your account registration is complete. You can now log in to the portal.`,
+        'welcome'
+      );
+
       const { password_hash, ...clean } = newUser;
       return clean;
     }

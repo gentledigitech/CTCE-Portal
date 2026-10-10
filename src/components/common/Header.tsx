@@ -21,7 +21,16 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({ settings, onTriggerInstall }) => {
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const [logoSrc, setLogoSrc] = useState('/college-logo.png');
   const [logoError, setLogoError] = useState(false);
+
+  const handleLogoError = () => {
+    if (logoSrc === '/college-logo.png') {
+      setLogoSrc('https://lh3.googleusercontent.com/d/1oKmWTIanlo2adz7GWseEkQZayxA8NFBH');
+    } else {
+      setLogoError(true);
+    }
+  };
 
   if (!user) return null;
 
@@ -40,10 +49,10 @@ export const Header: React.FC<HeaderProps> = ({ settings, onTriggerInstall }) =>
           <div className="relative w-11 h-11 sm:w-12 sm:h-12 rounded-2xl bg-gradient-to-br from-white via-sky-50 to-emerald-50 dark:from-slate-800 dark:to-slate-900 border border-sky-200/80 dark:border-sky-800/60 p-1 flex items-center justify-center overflow-hidden shrink-0 shadow-xs">
             {!logoError ? (
               <img
-                src="https://lh3.googleusercontent.com/d/1oKmWTIanlo2adz7GWseEkQZayxA8NFBH"
-                alt="CTCE Crest"
+                src={logoSrc}
+                alt="CTCE College Logo"
                 referrerPolicy="no-referrer"
-                onError={() => setLogoError(true)}
+                onError={handleLogoError}
                 className="w-full h-full object-contain"
               />
             ) : (

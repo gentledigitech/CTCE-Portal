@@ -5,6 +5,10 @@
  * and calls Arkesel to send plain SMS.
  * Fails closed if rate limit check or Turnstile check errors.
  * Returns HTTP 429 with Retry-After header on limit breach.
+ *
+ * Changed for real sign-up: it no longer creates or overwrites applicant rows (that now happens
+ * in the register function after the code is verified).
+ * Deploy with JWT verification OFF:  supabase functions deploy request-otp --no-verify-jwt
  */
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
@@ -30,7 +34,7 @@ serve(async (req: Request) => {
   if (corsResponse) return corsResponse;
 
   try {
-    const { phone, fullName, studentId, turnstileToken } = await req.json();
+    const { phone, turnstileToken } = await req.json();
 
     // Extract client IP address from proxy / gateway headers
     const clientIp =
@@ -173,21 +177,26 @@ serve(async (req: Request) => {
       }
     }
 
-    // Upsert pending applicant record
-    const { data: applicant } = await supabase
+    // Refuse early if this phone number already belongs to a registered account.
+    // The applicant record itself is now created by the register function AFTER the code
+    // is verified, so nobody can overwrite someone else's record just by requesting a code.
+    const { data: existingAccount } = await supabase
       .from('applicants')
-      .upsert(
-        {
-          full_name: (fullName || 'Trainee Applicant').trim(),
-          phone_e164: phoneE164,
-          applicant_ref: studentId ? studentId.trim().toUpperCase() : null,
-          ref_type: studentId ? 'student_id' : null,
-          status: 'pending'
-        },
-        { onConflict: 'phone_e164' }
-      )
       .select('id')
-      .single();
+      .eq('phone_e164', phoneE164)
+      .not('user_id', 'is', null)
+      .limit(1)
+      .maybeSingle();
+
+    if (existingAccount) {
+      return new Response(
+        JSON.stringify({ error: 'An account with this phone number already exists. Please sign in.' }),
+        {
+          status: 409,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        }
+      );
+    }
 
     // Invalidate existing unused codes for this phone
     await supabase
@@ -217,7 +226,7 @@ serve(async (req: Request) => {
       recipientE164: phoneE164,
       message,
       kind: 'otp',
-      applicantId: applicant?.id,
+      applicantId: undefined,
       supabaseClient: supabase
     });
 

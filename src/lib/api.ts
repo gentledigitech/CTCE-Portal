@@ -38,6 +38,46 @@ export const supabase: SupabaseClient | null = !USE_MOCK
 // What we read for every student: their row, plus their hall through the allocations table
 const APPLICANT_SELECT = '*, allocations(hall_id, halls(*))';
 
+const PASSPORT_BUCKET = 'passports';
+const PASSPORT_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
+const PASSPORT_LINK_SECONDS = 12 * 60 * 60; // photo links stay valid for 12 hours
+
+// Turns the picture chosen in the browser (a "data:image/jpeg;base64,..." string) into a file in
+// private storage, inside the student's own folder, and returns its path.
+async function uploadPassport(authUserId: string, dataUrl: string): Promise<string> {
+  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!match) throw new Error('Please choose a JPG, PNG or WebP picture.');
+  const mime = match[1];
+  const binary = atob(match[2]);
+  if (binary.length > PASSPORT_MAX_BYTES) throw new Error('Passport picture size must not exceed 2MB');
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const extension = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+  const path = `${authUserId}/passport-${Date.now()}.${extension}`;
+  const { error } = await supabase!.storage.from(PASSPORT_BUCKET).upload(path, bytes, {
+    contentType: mime,
+    upsert: false
+  });
+  if (error) throw new Error(`Could not upload the picture: ${error.message}`);
+  return path;
+}
+
+// The database stores only the file's path. Swap it for a temporary viewing link so <img> works.
+async function signPassports(rows: any[]): Promise<void> {
+  const isPath = (value: unknown): value is string =>
+    typeof value === 'string' && value !== '' && !value.startsWith('http') && !value.startsWith('data:');
+  const paths = Array.from(new Set(rows.map((r) => r.passport_url).filter(isPath)));
+  if (paths.length === 0) return;
+  const { data } = await supabase!.storage.from(PASSPORT_BUCKET).createSignedUrls(paths, PASSPORT_LINK_SECONDS);
+  const links = new Map<string, string>();
+  (data || []).forEach((entry: any) => {
+    if (entry?.path && entry?.signedUrl) links.set(entry.path, entry.signedUrl);
+  });
+  rows.forEach((row) => {
+    if (isPath(row.passport_url)) row.passport_url = links.get(row.passport_url);
+  });
+}
+
 // Sign-up is two screens (check the SMS code, then create the account) but ONE server call in
 // real mode. The code typed on the first screen is kept here until the account is created.
 let pendingSignUpCode: { phone: string; code: string } | null = null;
@@ -66,6 +106,7 @@ function mapApplicantRow(row: any, role: UserRole): TraineeUser {
     hall_sms_count: row.hall_sms_count ?? 0,
     hall_sms_sent_at: row.hall_sms_sent_at,
     phone_verified_at: row.phone_verified_at,
+    passport_url: row.passport_url || undefined,
     created_at: row.created_at,
     is_deleted: false
   } as unknown as TraineeUser;
@@ -99,6 +140,7 @@ async function loadRealUser(authUser: { id: string; email?: string | null; user_
   if (!row) {
     throw new Error('This login is not linked to a portal account. Please contact the administrator.');
   }
+  await signPassports([row]);
   const { data: viewerRow } = await supabase!.from('viewers').select('active').eq('applicant_id', row.id).maybeSingle();
   return mapApplicantRow(row, viewerRow?.active ? 'viewer' : 'applicant');
 }
@@ -115,6 +157,7 @@ async function fetchRealApplicants(): Promise<TraineeUser[]> {
     .select(APPLICANT_SELECT)
     .order('created_at', { ascending: false });
   if (error) throw error;
+  await signPassports(data || []);
   const { data: viewerRows } = await supabase!.from('viewers').select('applicant_id, active');
   const activeViewers = new Set((viewerRows || []).filter((v: any) => v.active).map((v: any) => v.applicant_id));
   return (data || []).map((row: any) => mapApplicantRow(row, activeViewers.has(row.id) ? 'viewer' : 'applicant'));
@@ -658,9 +701,43 @@ export const api = {
       const { password_hash, ...clean } = user;
       return { ...clean };
     }
-    const { data, error } = await supabase!.from('applicants').update(updates).eq('id', traineeId).select().single();
-    if (error) throw error;
-    return data;
+    // Real mode: a student saves their OWN profile through one database function that only lets
+    // name, programme, Trainee ID and passport photo change (level and status never can).
+    void actorId;
+    void reason;
+    const { data: authData } = await supabase!.auth.getUser();
+    const authUser = authData.user;
+    if (!authUser) throw new Error('You are not signed in. Please sign in again.');
+    const me: any = await currentRealUser();
+    if (me.id !== traineeId) {
+      throw new Error('Editing other trainees is not switched on yet.');
+    }
+
+    let newPassportPath: string | undefined;
+    const photo = updates.passport_url;
+    if (typeof photo === 'string' && photo.startsWith('data:')) {
+      newPassportPath = await uploadPassport(authUser.id, photo);
+    }
+
+    // Remember the old photo's path so it can be removed once the new one is saved
+    const { data: before } = await supabase!.from('applicants').select('passport_url').eq('id', traineeId).maybeSingle();
+
+    const { error } = await supabase!.rpc('update_my_profile', {
+      p_full_name: updates.full_name ?? null,
+      p_programme: updates.programme ?? null,
+      p_trainee_id: updates.trainee_id ?? null,
+      p_phone: updates.phone_e164 ?? null,
+      p_passport_path: newPassportPath ?? null
+    });
+    if (error) {
+      if (newPassportPath) await supabase!.storage.from(PASSPORT_BUCKET).remove([newPassportPath]);
+      throw new Error(error.message);
+    }
+
+    if (newPassportPath && before?.passport_url && before.passport_url !== newPassportPath) {
+      await supabase!.storage.from(PASSPORT_BUCKET).remove([before.passport_url]);
+    }
+    return currentRealUser();
   },
 
   async deleteTrainee(traineeId: string, actorId: string): Promise<void> {

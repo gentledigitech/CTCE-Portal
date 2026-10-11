@@ -59,7 +59,7 @@ function mapApplicantRow(row: any, role: UserRole): TraineeUser {
     programme: row.programme,
     level: row.level,
     role,
-    status: row.status,
+    status: Number(row.level) > 400 ? 'graduated' : row.status,
     hall_id: hall?.id ?? allocation?.hall_id,
     hall_name: hall?.name,
     hall_colour: hall?.colour ?? hall?.color,
@@ -135,6 +135,14 @@ const ACADEMIC_YEARS = generateAcademicYears(2026, 40);
 
 // Used in real mode whenever the settings table is empty or is missing a field,
 // so a screen never receives "undefined" (which blanks the whole page).
+// The halls table stores only the colour NAME, so the screen colours come from here
+const HALL_COLOUR_HEX: Record<string, string> = {
+  blue: '#2563eb',
+  cream: '#d97706',
+  green: '#16a34a',
+  'light green': '#059669'
+};
+
 const DEFAULT_SETTINGS: SystemSettings = {
   portal_open: true,
   allocation_mode: 'balanced',
@@ -516,10 +524,11 @@ export const api = {
       saveMockDB(db);
       return { ...db.settings };
     }
-    // Real Supabase update
-    const { data, error } = await supabase!.from('settings').update(updates).select().single();
-    if (error) throw error;
-    return data;
+    // Real mode: ONE database function checks that you are the Super Admin, saves the settings and,
+    // when the academic year changes, recalculates every student's level (and graduates anyone past 400).
+    const { error } = await supabase!.rpc('update_settings', { p_updates: updates });
+    if (error) throw new Error(error.message);
+    return this.getSettings();
   },
 
   // --- HALLS ---
@@ -540,7 +549,7 @@ export const api = {
       .map((h: any) => ({
         ...h,
         colour: h.colour ?? h.color ?? 'neutral',
-        colour_hex: h.colour_hex ?? h.color_hex ?? '#64748b',
+        colour_hex: h.colour_hex ?? h.color_hex ?? HALL_COLOUR_HEX[String(h.colour ?? '').toLowerCase()] ?? '#64748b',
         active: h.active ?? true,
         sort_order: h.sort_order ?? 0,
         occupancy: typeof h.occupancy === 'number' ? h.occupancy : counts.get(h.id) || 0

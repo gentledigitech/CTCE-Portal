@@ -26,7 +26,8 @@ const json = (body: unknown, status = 200) =>
     headers: { ...corsHeaders, 'Content-Type': 'application/json' }
   });
 
-const ALLOWED_LEVELS = [100, 200, 300, 400];
+// Trainee ID: CTCE/<3 capital letters>/<2-digit intake year>/0<3 digits>, e.g. CTCE/JHS/26/0123
+const TRAINEE_ID_PATTERN = /^CTCE\/[A-Z]{3}\/(\d{2})\/0\d{3}$/;
 const DEFAULT_PROGRAMME = 'Bachelor of Education (Primary)';
 
 serve(async (req: Request) => {
@@ -39,7 +40,7 @@ serve(async (req: Request) => {
       return json({ error: 'Invalid request.' }, 400);
     }
 
-    const { phone, code, fullName, email, password, studentId, level, programme } = body as Record<string, unknown>;
+    const { phone, code, fullName, email, password, studentId, programme } = body as Record<string, unknown>;
 
     // ---------- 1. Validate everything the browser sent ----------
     const phoneValidation = validatePhoneServer(phone);
@@ -68,14 +69,46 @@ serve(async (req: Request) => {
     }
 
     const cleanStudentId = studentId ? String(studentId).trim().toUpperCase().slice(0, 40) : null;
-    // Only continuing students (who gave a Trainee ID) can start above level 100
-    const cleanLevel = cleanStudentId && ALLOWED_LEVELS.includes(Number(level)) ? Number(level) : 100;
     const cleanProgramme = String(programme ?? '').trim().slice(0, 120) || DEFAULT_PROGRAMME;
 
     const supabaseUrl = requireEnv('SUPABASE_URL');
     const supabaseServiceKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
     const pepper = requireEnv('OTP_PEPPER');
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    // ---------- 1b. Trainee ID rule and level (the server decides, never the browser) ----------
+    // level = (start year of the current academic year - intake year + 1) x 100
+    const { data: settingsRow } = await supabase
+      .from('settings')
+      .select('current_academic_year')
+      .eq('id', 1)
+      .maybeSingle();
+    const startYear = parseInt(String(settingsRow?.current_academic_year ?? '').split('/')[0], 10);
+    if (!Number.isInteger(startYear)) {
+      console.error('settings.current_academic_year is missing or invalid');
+      return json({ error: 'Registration is not available right now. Please try again later.' }, 503);
+    }
+
+    let intakeYear = startYear; // applicants without a Trainee ID count as this year's intake
+    let cleanLevel = 100;
+    if (cleanStudentId) {
+      const match = TRAINEE_ID_PATTERN.exec(cleanStudentId);
+      if (!match) {
+        return json({ error: 'Trainee ID must look like CTCE/ABC/26/0123.' }, 400);
+      }
+      intakeYear = 2000 + parseInt(match[1], 10);
+      const levelNow = (startYear - intakeYear + 1) * 100;
+      if (levelNow < 100) {
+        return json({ error: 'This Trainee ID is for a future intake and cannot be used yet.' }, 400);
+      }
+      if (levelNow > 400) {
+        return json(
+          { error: 'This Trainee ID belongs to a trainee who has completed the programme and can no longer be used on this portal.' },
+          400
+        );
+      }
+      cleanLevel = levelNow;
+    }
 
     // ---------- 2. Check the SMS code (same rules as verify-otp) ----------
     const { data: otpRecord } = await supabase
@@ -182,6 +215,7 @@ serve(async (req: Request) => {
       phone_e164: phoneE164,
       programme: cleanProgramme,
       level: cleanLevel,
+      intake_year: intakeYear,
       user_id: authUserId,
       applicant_ref: applicantRef,
       ref_type: refType,

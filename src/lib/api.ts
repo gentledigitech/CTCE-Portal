@@ -738,6 +738,30 @@ export const api = {
     if (!authUser) throw new Error('You are not signed in. Please sign in again.');
     const me: any = await currentRealUser();
     if (me.id !== traineeId) {
+      // Staff changing someone else: only the Viewer role is switched on so far
+      const isStaff = me.role === 'admin' || me.role === 'super_admin';
+      if (isStaff && updates.role !== undefined) {
+        if (updates.role !== 'viewer' && updates.role !== 'applicant') {
+          throw new Error('Only the Viewer role can be granted or removed here for now.');
+        }
+        const { error: roleError } = await supabase!.rpc('set_viewer_access', {
+          p_applicant: traineeId,
+          p_active: updates.role === 'viewer'
+        });
+        if (roleError) throw new Error(roleError.message);
+
+        const otherChanges = Object.keys(updates).filter((key) => key !== 'role');
+        if (otherChanges.length > 0) {
+          console.warn('These changes were not saved (not switched on yet):', otherChanges.join(', '));
+        }
+
+        const { data: changedRow } = await supabase!
+          .from('applicants')
+          .select(APPLICANT_SELECT)
+          .eq('id', traineeId)
+          .maybeSingle();
+        return mapApplicantRow(changedRow, updates.role === 'viewer' ? 'viewer' : 'applicant');
+      }
       throw new Error('Editing other trainees is not switched on yet.');
     }
 

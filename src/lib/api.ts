@@ -133,6 +133,17 @@ export function generateAcademicYears(startYear = 2026, count = 40): string[] {
 
 const ACADEMIC_YEARS = generateAcademicYears(2026, 40);
 
+// Used in real mode whenever the settings table is empty or is missing a field,
+// so a screen never receives "undefined" (which blanks the whole page).
+const DEFAULT_SETTINGS: SystemSettings = {
+  portal_open: true,
+  allocation_mode: 'balanced',
+  current_academic_year: '2026/2027',
+  current_semester: 1,
+  academic_years_list: ACADEMIC_YEARS,
+  sms_daily_cap: 500
+} as SystemSettings;
+
 // ============================================================================
 // RATE LIMITING CONFIGURATION & ERROR TYPES
 // ============================================================================
@@ -446,10 +457,18 @@ export const api = {
     if (USE_MOCK) {
       return { ...db.settings };
     }
-    // Real Supabase call
-    const { data, error } = await supabase!.from('settings').select('*').single();
+    // Real Supabase call: never fail on an empty table, and fill any missing field with a default
+    const { data, error } = await supabase!.from('settings').select('*').limit(1).maybeSingle();
     if (error) throw error;
-    return data;
+    const stored: Record<string, any> = {};
+    Object.entries(data || {}).forEach(([key, value]) => {
+      if (value !== null && value !== undefined) stored[key] = value;
+    });
+    const merged: any = { ...DEFAULT_SETTINGS, ...stored };
+    if (!Array.isArray(merged.academic_years_list) || merged.academic_years_list.length === 0) {
+      merged.academic_years_list = ACADEMIC_YEARS;
+    }
+    return merged as SystemSettings;
   },
 
   async updateSettings(updates: Partial<SystemSettings>, actorId: string): Promise<SystemSettings> {
@@ -509,9 +528,24 @@ export const api = {
       refreshOccupancies();
       return [...db.halls];
     }
-    const { data, error } = await supabase!.from('halls').select('*').order('sort_order', { ascending: true });
+    const { data, error } = await supabase!.from('halls').select('*');
     if (error) throw error;
-    return data || [];
+
+    // If the halls table has no occupancy column, count the allocations instead
+    const counts = new Map<string, number>();
+    const { data: allocRows } = await supabase!.from('allocations').select('hall_id');
+    (allocRows || []).forEach((row: any) => counts.set(row.hall_id, (counts.get(row.hall_id) || 0) + 1));
+
+    return (data || [])
+      .map((h: any) => ({
+        ...h,
+        colour: h.colour ?? h.color ?? 'neutral',
+        colour_hex: h.colour_hex ?? h.color_hex ?? '#64748b',
+        active: h.active ?? true,
+        sort_order: h.sort_order ?? 0,
+        occupancy: typeof h.occupancy === 'number' ? h.occupancy : counts.get(h.id) || 0
+      }))
+      .sort((a: any, b: any) => a.sort_order - b.sort_order || String(a.name).localeCompare(String(b.name))) as Hall[];
   },
 
   async updateHallCapacity(hallId: string, newCapacity: number, actorId: string): Promise<Hall> {

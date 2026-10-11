@@ -69,12 +69,24 @@ serve(async (req: Request) => {
     }
 
     const cleanStudentId = studentId ? String(studentId).trim().toUpperCase().slice(0, 40) : null;
-    const cleanProgramme = String(programme ?? '').trim().slice(0, 120) || DEFAULT_PROGRAMME;
+    const requestedProgramme = String(programme ?? '').trim().slice(0, 120);
 
     const supabaseUrl = requireEnv('SUPABASE_URL');
     const supabaseServiceKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
     const pepper = requireEnv('OTP_PEPPER');
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    // ---------- 1a. Programme must be one of the allowed ones ----------
+    const { data: allowedProgrammes, error: programmesError } = await supabase.rpc('allowed_programmes');
+    if (programmesError || !Array.isArray(allowedProgrammes)) {
+      console.error('allowed_programmes failed:', programmesError?.message);
+      return json({ error: 'Registration is not available right now. Please try again later.' }, 503);
+    }
+    if (requestedProgramme && !allowedProgrammes.includes(requestedProgramme)) {
+      return json({ error: 'Please choose one of the listed programmes.' }, 400);
+    }
+    // Old cached copies of the site do not send a programme yet; they get the default
+    const cleanProgramme = requestedProgramme || DEFAULT_PROGRAMME;
 
     // ---------- 1b. Trainee ID rule and level (the server decides, never the browser) ----------
     // level = (start year of the current academic year - intake year + 1) x 100

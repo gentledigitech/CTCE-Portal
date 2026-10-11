@@ -4,6 +4,7 @@ import { useTheme } from '../../context/ThemeContext';
 import { api, RateLimitError } from '../../lib/api';
 import { validateGhanaPhone, validateStudentId, validateFullName } from '../../lib/validators';
 import { TurnstileWidget } from './TurnstileWidget';
+import { PROGRAMMES } from '../../lib/programmes';
 import {
   Lock,
   Mail,
@@ -92,6 +93,7 @@ export const AuthPage: React.FC = () => {
   const [signUpFullName, setSignUpFullName] = useState('');
   const [signUpEmail, setSignUpEmail] = useState('');
   const [signUpPhone, setSignUpPhone] = useState('');
+  const [signUpProgramme, setSignUpProgramme] = useState('');
   const [signUpPassword, setSignUpPassword] = useState('');
   const [signUpConfirmPassword, setSignUpConfirmPassword] = useState('');
   const [isContinuingStudent, setIsContinuingStudent] = useState(false);
@@ -190,6 +192,12 @@ export const AuthPage: React.FC = () => {
     const phoneVal = validateGhanaPhone(signUpPhone);
     if (!phoneVal.isValid || !phoneVal.normalized) {
       setSignUpError(phoneVal.error || 'Please enter a valid Ghanaian phone number.');
+      return;
+    }
+
+    // Programme of study
+    if (!signUpProgramme) {
+      setSignUpError('Please choose your programme of study.');
       return;
     }
 
@@ -320,7 +328,8 @@ export const AuthPage: React.FC = () => {
         password: signUpPassword,
         isContinuingStudent,
         traineeId: validatedTraineeId,
-        level: calculatedLevel
+        level: calculatedLevel,
+        programme: signUpProgramme
       });
 
       setSignUpSuccess('Phone verified and account successfully created! You may now sign in.');
@@ -889,6 +898,31 @@ export const AuthPage: React.FC = () => {
                         required
                         className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-stone-900 dark:text-white focus:border-sky-500 text-sm min-h-[44px]"
                       />
+                    </div>
+                  </div>
+
+                  {/* Programme of study */}
+                  <div>
+                    <label className="block text-xs font-bold text-stone-700 dark:text-stone-300 uppercase tracking-wider mb-1">
+                      Programme of Study
+                    </label>
+                    <div className="relative">
+                      <GraduationCap className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <select
+                        value={signUpProgramme}
+                        onChange={(e) => setSignUpProgramme(e.target.value)}
+                        required
+                        className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-stone-900 dark:text-white focus:border-sky-500 text-sm min-h-[44px]"
+                      >
+                        <option value="" disabled>
+                          Select your programme
+                        </option>
+                        {PROGRAMMES.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                   </div>
 

@@ -68,14 +68,42 @@ async function signPassports(rows: any[]): Promise<void> {
     typeof value === 'string' && value !== '' && !value.startsWith('http') && !value.startsWith('data:');
   const paths = Array.from(new Set(rows.map((r) => r.passport_url).filter(isPath)));
   if (paths.length === 0) return;
-  const { data } = await supabase!.storage.from(PASSPORT_BUCKET).createSignedUrls(paths, PASSPORT_LINK_SECONDS);
+  const { data, error } = await supabase!.storage.from(PASSPORT_BUCKET).createSignedUrls(paths, PASSPORT_LINK_SECONDS);
+  if (error) {
+    // Without this line a failed link looks like "the picture just does not show"
+    console.warn('Passport picture links could not be created:', error.message);
+  }
   const links = new Map<string, string>();
   (data || []).forEach((entry: any) => {
+    if (entry?.error) console.warn('Passport picture link failed:', entry.path, entry.error);
     if (entry?.path && entry?.signedUrl) links.set(entry.path, entry.signedUrl);
   });
   rows.forEach((row) => {
     if (isPath(row.passport_url)) row.passport_url = links.get(row.passport_url);
   });
+}
+
+// For the signed-in student's own picture: download the file through their login and show it from
+// memory (a "blob:" address). This does not depend on the browser loading a link from another site,
+// and it also repairs a file that was saved with the wrong content type.
+async function loadOwnPassport(row: any): Promise<void> {
+  const path = row.passport_url;
+  if (typeof path !== 'string' || path === '' || path.startsWith('http') || path.startsWith('data:')) return;
+
+  const { data: file, error } = await supabase!.storage.from(PASSPORT_BUCKET).download(path);
+  if (!error && file && file.size > 0) {
+    const extension = (path.split('.').pop() || '').toLowerCase();
+    const guessedType = extension === 'png' ? 'image/png' : extension === 'webp' ? 'image/webp' : 'image/jpeg';
+    const picture = file.type.startsWith('image/') ? file : new Blob([file], { type: guessedType });
+    row.passport_url = URL.createObjectURL(picture);
+    return;
+  }
+
+  console.warn(
+    'Passport picture could not be downloaded:',
+    error?.message ?? `empty or unexpected file (size ${file?.size}, type ${file?.type})`
+  );
+  await signPassports([row]); // fall back to a temporary viewing link
 }
 
 // Sign-up is two screens (check the SMS code, then create the account) but ONE server call in
@@ -140,7 +168,7 @@ async function loadRealUser(authUser: { id: string; email?: string | null; user_
   if (!row) {
     throw new Error('This login is not linked to a portal account. Please contact the administrator.');
   }
-  await signPassports([row]);
+  await loadOwnPassport(row);
   const { data: viewerRow } = await supabase!.from('viewers').select('active').eq('applicant_id', row.id).maybeSingle();
   return mapApplicantRow(row, viewerRow?.active ? 'viewer' : 'applicant');
 }
@@ -737,7 +765,10 @@ export const api = {
     if (newPassportPath && before?.passport_url && before.passport_url !== newPassportPath) {
       await supabase!.storage.from(PASSPORT_BUCKET).remove([before.passport_url]);
     }
-    return currentRealUser();
+    const refreshed: any = await currentRealUser();
+    // Show the new picture straight away, even if its viewing link could not be created
+    if (newPassportPath && !refreshed.passport_url) refreshed.passport_url = photo;
+    return refreshed;
   },
 
   async deleteTrainee(traineeId: string, actorId: string): Promise<void> {
